@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "react": "^18.3.0",
+    "@mui/material": "^5.x.x",
+    "@emotion/react": "^11.x.x",
+    "@emotion/styled": "^11.x.x",
+    "@mui/icons-material": "^5.x.x"
+  }
+}
