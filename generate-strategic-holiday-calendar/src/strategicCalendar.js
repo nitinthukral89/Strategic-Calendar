@@ -27,30 +27,47 @@ import { Upload, Calendar, Download, ChevronDown } from "lucide-react";
 import * as XLSX from "xlsx";
 
 // Add ICS generation utility function
-const generateICS = (recommendations) => {
-  const events = recommendations.flatMap((rec) => {
-    return rec.dates.map((date) => {
-      // Format date to YYYYMMDD
-      const formatDate = (d) => {
-        return d.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-      };
+const generateICS = (recommendations, holidays) => {
+  // Combine both holidays and recommendations for complete calendar
+  const allEvents = [
+    ...holidays.map(holiday => ({
+      date: holiday.date,
+      title: `Holiday: ${holiday.name}`,
+      description: `Official Holiday: ${holiday.name}`,
+      type: 'CONFIRMED'
+    })),
+    ...recommendations.flatMap(rec => 
+      rec.dates.map(date => ({
+        date,
+        title: `Suggested Leave: ${rec.title}`,
+        description: `${rec.strategy}\nEfficiency Score: ${rec.efficiency.toFixed(2)}`,
+        type: 'TENTATIVE'
+      }))
+    )
+  ];
 
-      return `BEGIN:VEVENT
-DTSTART:${formatDate(date)}
-DTEND:${formatDate(new Date(date.getTime() + 24 * 60 * 60 * 1000))}
-SUMMARY:Strategic Leave - ${rec.title}
-DESCRIPTION:${rec.strategy}
-STATUS:TENTATIVE
+  const events = allEvents.map(event => {
+    const formatDate = (d) => {
+      const date = new Date(d);
+      return date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+    };
+
+    const endDate = new Date(event.date);
+    endDate.setDate(endDate.getDate() + 1);
+
+    return `BEGIN:VEVENT
+DTSTART:${formatDate(event.date)}
+DTEND:${formatDate(endDate)}
+SUMMARY:${event.title}
+DESCRIPTION:${event.description}
+STATUS:${event.type}
 SEQUENCE:0
-CATEGORIES:${rec.color || "None"} // Added color category
-RRULE:${rec.recurring ? `FREQ=${rec.recurring};BYMONTH=${date.getMonth() + 1};BYDAY=${date.getDate()}` : ''} // Added support for recurring events
 BEGIN:VALARM
-TRIGGER:-PT1H
-DESCRIPTION:Reminder for ${rec.title}
+TRIGGER:-PT24H
 ACTION:DISPLAY
+DESCRIPTION:Reminder: ${event.title}
 END:VALARM
 END:VEVENT`;
-    });
   });
 
   return `BEGIN:VCALENDAR
@@ -92,15 +109,15 @@ const HolidayPlanner = () => {
 
   // Add export functions for calendar formats
   const exportCalendar = useCallback((format) => {
-    const calendar = generateICS(recommendations);
+    const calendar = generateICS(recommendations, holidays);
     const blob = new Blob([calendar], { type: 'text/calendar;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `strategic-leaves.${format}`;
+    link.download = `strategic-leave-calendar.${format}`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-  }, [recommendations]);
+  }, [recommendations, holidays]);
 
   // Parse XLS file
   const parseXLS = useCallback((buffer) => {
@@ -137,85 +154,110 @@ const HolidayPlanner = () => {
     sortedHolidays.forEach((holiday, index) => {
       const dayOfWeek = holiday.date.getDay();
       
-      // Long weekend opportunities
-      if (dayOfWeek === 2) { // Tuesday
+      // Enhanced long weekend opportunities
+      if ([1, 2, 3, 4].includes(dayOfWeek)) { // Monday through Thursday
+        const daysBeforeWeekend = 5 - dayOfWeek;
         recommendations.push({
           type: 'Long Weekend',
           title: 'Extended Weekend Opportunity',
-          strategy: `Take Monday off to create a 4-day weekend with ${holiday.name}`,
-          dates: [
-            new Date(holiday.date.getTime() - 86400000),
-            holiday.date
-          ],
+          strategy: `Take ${daysBeforeWeekend} day(s) after ${holiday.name} for a ${daysBeforeWeekend + 3}-day weekend`,
+          dates: Array.from({ length: daysBeforeWeekend + 1 }, (_, i) => 
+            new Date(holiday.date.getTime() + i * 86400000)
+          ),
           holiday: holiday.name,
-          daysNeeded: 1,
-          efficiency: 4/1 // 4 days off for 1 leave day
-        });
-      } else if (dayOfWeek === 4) { // Thursday
-        recommendations.push({
-          type: 'Long Weekend',
-          title: 'Extended Weekend Opportunity',
-          strategy: `Take Friday off to create a 4-day weekend with ${holiday.name}`,
-          dates: [
-            holiday.date,
-            new Date(holiday.date.getTime() + 86400000)
-          ],
-          holiday: holiday.name,
-          daysNeeded: 1,
-          efficiency: 4/1
+          daysNeeded: daysBeforeWeekend,
+          efficiency: (daysBeforeWeekend + 3) / daysBeforeWeekend
         });
       }
       
-      // Bridge days analysis
-      if (index < sortedHolidays.length - 1) {
-        const nextHoliday = sortedHolidays[index + 1];
+      if ([2, 3, 4, 5].includes(dayOfWeek)) { // Tuesday through Friday
+        const daysAfterWeekend = dayOfWeek - 1;
+        recommendations.push({
+          type: 'Long Weekend',
+          title: 'Extended Weekend Opportunity',
+          strategy: `Take ${daysAfterWeekend} day(s) before ${holiday.name} for a ${daysAfterWeekend + 3}-day weekend`,
+          dates: Array.from({ length: daysAfterWeekend + 1 }, (_, i) => 
+            new Date(holiday.date.getTime() - (daysAfterWeekend - i) * 86400000)
+          ),
+          holiday: holiday.name,
+          daysNeeded: daysAfterWeekend,
+          efficiency: (daysAfterWeekend + 3) / daysAfterWeekend
+        });
+      }
+      
+      // Enhanced bridge days analysis
+      for (let j = index + 1; j < sortedHolidays.length; j++) {
+        const nextHoliday = sortedHolidays[j];
         const daysBetween = Math.floor((nextHoliday.date - holiday.date) / 86400000) - 1;
         
-        if (daysBetween > 0 && daysBetween <= 4) {
+        if (daysBetween > 0 && daysBetween <= 5) { // Increased range to 5 days
           const bridgeDays = [];
+          const workDays = [];
+          
           for (let i = 1; i <= daysBetween; i++) {
-            bridgeDays.push(new Date(holiday.date.getTime() + i * 86400000));
+            const bridgeDate = new Date(holiday.date.getTime() + i * 86400000);
+            bridgeDays.push(bridgeDate);
+            if (bridgeDate.getDay() !== 0 && bridgeDate.getDay() !== 6) {
+              workDays.push(bridgeDate);
+            }
           }
           
-          recommendations.push({
-            type: 'Bridge',
-            title: 'Bridge Days Opportunity',
-            strategy: `Take ${daysBetween} day${daysBetween > 1 ? 's' : ''} between ${holiday.name} and ${nextHoliday.name} for an extended break`,
-            dates: [holiday.date, ...bridgeDays, nextHoliday.date],
-            daysNeeded: daysBetween,
-            efficiency: (daysBetween + 2)/daysBetween
-          });
+          if (workDays.length > 0) {
+            recommendations.push({
+              type: 'Bridge',
+              title: 'Bridge Days Opportunity',
+              strategy: `Take ${workDays.length} work day(s) between ${holiday.name} and ${nextHoliday.name} for a ${daysBetween + 2}-day break`,
+              dates: [holiday.date, ...bridgeDays, nextHoliday.date],
+              daysNeeded: workDays.length,
+              efficiency: (daysBetween + 2) / workDays.length
+            });
+          }
         }
       }
       
-      // Cluster analysis (looking ahead 14 days for multiple holidays)
-      const nextTwoWeeks = sortedHolidays.filter(h => 
+      // Enhanced cluster analysis
+      const nextThreeWeeks = sortedHolidays.filter(h => 
         h.date > holiday.date && 
-        (h.date - holiday.date) <= 1209600000 // 14 days in milliseconds
+        (h.date - holiday.date) <= 1814400000 // 21 days in milliseconds
       );
       
-      if (nextTwoWeeks.length >= 2) {
-        const clusterDays = new Set();
-        nextTwoWeeks.forEach(h => {
-          for (let i = -1; i <= 1; i++) {
-            clusterDays.add(new Date(h.date.getTime() + i * 86400000).toISOString().split('T')[0]);
-          }
-        });
+      if (nextThreeWeeks.length >= 2) {
+        const allDates = [holiday, ...nextThreeWeeks].map(h => h.date);
+        const workDays = new Set();
+        const holidayDates = new Set(allDates.map(d => d.toISOString().split('T')[0]));
         
-        if (clusterDays.size >= 4) {
+        // Find all work days between first and last holiday
+        for (let d = new Date(allDates[0]); d <= allDates[allDates.length - 1]; d.setDate(d.getDate() + 1)) {
+          const dateStr = d.toISOString().split('T')[0];
+          if (d.getDay() !== 0 && d.getDay() !== 6 && !holidayDates.has(dateStr)) {
+            workDays.add(dateStr);
+          }
+        }
+        
+        if (workDays.size <= 7) { // Only suggest if 7 or fewer work days needed
           recommendations.push({
             type: 'Cluster',
-            title: 'Holiday Cluster Found',
-            strategy: `Multiple holidays found within 2 weeks. Consider taking strategic leave days to maximize time off`,
-            dates: [holiday.date, ...nextTwoWeeks.map(h => h.date)],
-            daysNeeded: clusterDays.size - nextTwoWeeks.length - 1,
-            efficiency: clusterDays.size/(clusterDays.size - nextTwoWeeks.length - 1)
+            title: 'Holiday Cluster Opportunity',
+            strategy: `Take ${workDays.size} work days to create an extended break of ${
+              Math.ceil((allDates[allDates.length - 1] - allDates[0]) / 86400000) + 1
+            } days`,
+            dates: allDates,
+            daysNeeded: workDays.size,
+            efficiency: (Math.ceil((allDates[allDates.length - 1] - allDates[0]) / 86400000) + 1) / workDays.size
           });
         }
       }
     });
     
-    return recommendations.sort((a, b) => b.efficiency - a.efficiency);
+    // Sort by efficiency and remove duplicates
+    return recommendations
+      .sort((a, b) => b.efficiency - a.efficiency)
+      .filter((rec, index, self) => 
+        index === self.findIndex(r => 
+          r.dates.length === rec.dates.length && 
+          r.dates.every((d, i) => d.getTime() === rec.dates[i].getTime())
+        )
+      );
   }, []);
 
   // Handle file upload
@@ -256,7 +298,7 @@ const HolidayPlanner = () => {
         setLoading(false);
       }
     },
-    [parseXLS, analyzeHolidays]
+    [parseXLS]
   );
   
   // Get calendar days
@@ -390,17 +432,19 @@ const HolidayPlanner = () => {
   // Export recommendations
   const exportRecommendations = useCallback(() => {
     const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(
-      recommendations.map((rec) => ({
-        Type: rec.title,
-        Strategy: rec.strategy,
-        "Days Needed": rec.daysNeeded,
-        "Efficiency Score": rec.efficiency.toFixed(2),
-        Dates: rec.dates.map((d) => d.toLocaleDateString()).join(", "),
-      }))
-    );
+    const wsData = recommendations.map((rec) => ({
+      Type: rec.type,
+      Title: rec.title,
+      Strategy: rec.strategy,
+      "Days Needed": rec.daysNeeded,
+      "Efficiency Score": rec.efficiency.toFixed(2),
+      Dates: rec.dates.map((d) => d.toLocaleDateString()).join(", "),
+      "Related Holiday": rec.holiday || "Multiple"
+    }));
+    
+    const ws = XLSX.utils.json_to_sheet(wsData);
     XLSX.utils.book_append_sheet(wb, ws, "Leave Recommendations");
-    XLSX.writeFile(wb, "leave-recommendations.xlsx");
+    XLSX.writeFile(wb, "strategic-leave-recommendations.xlsx");
   }, [recommendations]);
 
   // Render UI
